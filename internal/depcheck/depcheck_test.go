@@ -47,7 +47,7 @@ func TestCheck(t *testing.T) {
 		// system files and failed probes of non-generated paths are ignored
 		6: step(6, "cc a", read("/usr/include/stdio.h"), missing("/s/nope.h")),
 	}}
-	rep := Check(g, res, "/s", cmds)
+	rep := Check(g, []*sandbox.Result{res}, "/s", cmds)
 	want := []Finding{
 		{Kind: KindRace, Step: "b.o", File: "gen.h", Producer: "gen.h"},
 		{Kind: KindRace, Step: "c.o", File: "gen.h", Producer: "gen.h", Missing: true},
@@ -61,15 +61,41 @@ func TestCheck(t *testing.T) {
 			t.Errorf("finding %d = %+v, want %+v", i, rep.Findings[i], want[i])
 		}
 	}
-	if rep.Steps != 5 {
-		t.Errorf("matched %d steps, want 5 (including the failed one)", rep.Steps)
+	// gen.h, a.o (run twice), b.o, and c.o, which failed but is still matched.
+	if rep.Steps != 4 {
+		t.Errorf("matched %d distinct steps, want 4", rep.Steps)
 	}
 }
 
 func TestNoFindingsIsEmptyNotNil(t *testing.T) {
 	g, cmds := testGraph()
-	rep := Check(g, &sandbox.Result{Root: 1, Processes: map[int]*sandbox.Process{1: {Pid: 1}}}, "/s", cmds)
+	rep := Check(g, []*sandbox.Result{{Root: 1, Processes: map[int]*sandbox.Process{1: {Pid: 1}}}}, "/s", cmds)
 	if rep.Findings == nil {
 		t.Fatal("Findings must be an empty slice so the JSON report has [] rather than null")
+	}
+}
+
+func TestRetriedStepAcrossPasses(t *testing.T) {
+	// Pass 1: c.o fails (gen.h does not exist yet, and the compiler never
+	// probed for it), reading only headers. Pass 2: the retry succeeds and
+	// reads gen.h. Together they must give exactly one race and no
+	// "undeclared source" noise for the failed attempt.
+	g, cmds := testGraph()
+	cmds["cc -MD c"] = "/b/c.o"
+	delete(cmds, "cc c")
+	pass1 := &sandbox.Result{Root: 1, Processes: map[int]*sandbox.Process{
+		1: {Pid: 1},
+		2: step(2, "cc -MD c", read("/s/c.cpp"), read("/s/c.h")),
+	}}
+	pass2 := &sandbox.Result{Root: 10, Processes: map[int]*sandbox.Process{
+		10: {Pid: 10},
+		11: {Pid: 11, Parent: 10, Argv: []string{"/bin/sh", "-c", "cc -MD c"}, Accesses: []sandbox.Access{read("/s/c.cpp"), read("/s/c.h"), read("/b/gen.h"), write("/b/c.o")}},
+	}}
+	rep := Check(g, []*sandbox.Result{pass1, pass2}, "/s", cmds)
+	if len(rep.Findings) != 1 || rep.Findings[0].Kind != KindRace || rep.Findings[0].Step != "c.o" {
+		t.Fatalf("findings = %+v", rep.Findings)
+	}
+	if rep.Steps != 1 {
+		t.Fatalf("steps = %d, want 1 (the same step in both passes)", rep.Steps)
 	}
 }

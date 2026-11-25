@@ -46,7 +46,12 @@ type Report struct {
 // Only files under srcRoot or the build directory are considered. commands
 // maps each edge's command line to its first output (see ninja.Commands); it
 // identifies steps that failed before writing anything.
-func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string, commands map[string]string) Report {
+//
+// passes holds one trace per Ninja invocation: when a build fails (often
+// because of the very race being looked for), kiln-dep runs Ninja again for
+// the remaining steps, and all passes are checked together. Load g after the
+// last pass so depfile dependencies of steps that succeeded on a retry count.
+func Check(g *ninja.Graph, passes []*sandbox.Result, srcRoot string, commands map[string]string) Report {
 	rep := Report{Findings: []Finding{}} // [] rather than null in JSON
 	srcRoot = filepath.Clean(srcRoot)
 	under := func(p, root string) bool { return p == root || strings.HasPrefix(p, root+"/") }
@@ -66,102 +71,115 @@ func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string, commands map[str
 		return b == ".ninja_log" || b == ".ninja_deps" || b == "build.ninja" || strings.HasPrefix(b, ".kiln-")
 	}
 
+	// A step whose command writes a depfile reports the headers it reads,
+	// even if it failed before Ninja could record them.
+	writesDepfile := map[string]bool{}
+	for cmd, out := range commands {
+		if strings.Contains(cmd, " -MD ") || strings.Contains(cmd, " -MMD ") || strings.Contains(cmd, " -MF ") {
+			writesDepfile[out] = true
+		}
+	}
+
 	// Each child of the root process (Ninja) runs one build step.
 	seen := map[string]bool{}
-	for _, child := range res.Children(res.Root) {
-		var reads, writes, missing []string
-		for _, p := range res.Subtree(child) {
-			for _, a := range p.Accesses {
-				if a.Dir || !inScope(a.Path) || ignored(a.Path) {
-					continue
+	steps := map[*ninja.Edge]bool{}
+	for _, res := range passes {
+		for _, child := range res.Children(res.Root) {
+			var reads, writes, missing []string
+			for _, p := range res.Subtree(child) {
+				for _, a := range p.Accesses {
+					if a.Dir || !inScope(a.Path) || ignored(a.Path) {
+						continue
+					}
+					switch {
+					case a.Missing:
+						missing = append(missing, a.Path)
+					case a.Write:
+						writes = append(writes, a.Path)
+					default:
+						reads = append(reads, a.Path)
+					}
 				}
-				switch {
-				case a.Missing:
-					missing = append(missing, a.Path)
-				case a.Write:
-					writes = append(writes, a.Path)
-				default:
-					reads = append(reads, a.Path)
+			}
+			edge := matchCommand(g, commands, res.Processes[child])
+			if edge == nil {
+				edge = matchEdge(g, writes)
+			}
+			if edge == nil {
+				if len(reads)+len(writes) > 0 {
+					rep.Unmatched++
 				}
-			}
-		}
-		edge := matchCommand(g, commands, res.Processes[child])
-		if edge == nil {
-			edge = matchEdge(g, writes)
-		}
-		if edge == nil {
-			if len(reads)+len(writes) > 0 {
-				rep.Unmatched++
-			}
-			continue
-		}
-		rep.Steps++
-		step := rel(edge.Outputs[0])
-		own := map[string]bool{}
-		for _, w := range writes {
-			own[w] = true
-		}
-		for _, o := range edge.Outputs {
-			own[o] = true
-		}
-		declared := map[string]bool{}
-		for _, in := range edge.StaticInputs() {
-			declared[in] = true
-		}
-		for _, d := range edge.Deps {
-			declared[d] = true
-		}
-		hasDepfile := len(edge.Deps) > 0
-		var upstream map[*ninja.Edge]bool
-		add := func(f Finding) {
-			key := f.Kind + "\x00" + f.Step + "\x00" + f.File
-			if !seen[key] {
-				seen[key] = true
-				rep.Findings = append(rep.Findings, f)
-			}
-		}
-		for _, w := range writes {
-			if !under(w, g.Dir) {
-				add(Finding{Kind: KindOutsideWrite, Step: step, File: rel(w)})
-			}
-		}
-		for _, m := range dedupe(missing) {
-			producer, ok := g.Producer[m]
-			if !ok || producer.Phony() || producer == edge {
 				continue
 			}
-			if upstream == nil {
-				upstream = g.Upstream(edge)
+			steps[edge] = true
+			step := rel(edge.Outputs[0])
+			own := map[string]bool{}
+			for _, w := range writes {
+				own[w] = true
 			}
-			if !upstream[producer] {
-				add(Finding{Kind: KindRace, Step: step, File: rel(m), Producer: rel(producer.Outputs[0]), Missing: true})
+			for _, o := range edge.Outputs {
+				own[o] = true
 			}
-		}
-		for _, r := range dedupe(reads) {
-			if own[r] {
-				continue
+			declared := map[string]bool{}
+			for _, in := range edge.StaticInputs() {
+				declared[in] = true
 			}
-			rep.Reads++
-			if g.IsGenerated(r) {
-				producer := g.Producer[r]
-				if producer == edge {
+			for _, d := range edge.Deps {
+				declared[d] = true
+			}
+			hasDepfile := len(edge.Deps) > 0 || writesDepfile[edge.Outputs[0]]
+			var upstream map[*ninja.Edge]bool
+			add := func(f Finding) {
+				key := f.Kind + "\x00" + f.Step + "\x00" + f.File
+				if !seen[key] {
+					seen[key] = true
+					rep.Findings = append(rep.Findings, f)
+				}
+			}
+			for _, w := range writes {
+				if !under(w, g.Dir) {
+					add(Finding{Kind: KindOutsideWrite, Step: step, File: rel(w)})
+				}
+			}
+			for _, m := range dedupe(missing) {
+				producer, ok := g.Producer[m]
+				if !ok || producer.Phony() || producer == edge {
 					continue
 				}
 				if upstream == nil {
 					upstream = g.Upstream(edge)
 				}
 				if !upstream[producer] {
-					add(Finding{Kind: KindRace, Step: step, File: rel(r), Producer: rel(producer.Outputs[0])})
+					add(Finding{Kind: KindRace, Step: step, File: rel(m), Producer: rel(producer.Outputs[0]), Missing: true})
 				}
-				continue
 			}
-			// A source file. Steps with a depfile report what they read, so
-			// only steps without one can silently miss an input.
-			if !declared[r] && !hasDepfile && !strings.HasPrefix(rel(r), "CMakeFiles/") {
-				add(Finding{Kind: KindStale, Step: step, File: rel(r)})
+			for _, r := range dedupe(reads) {
+				if own[r] {
+					continue
+				}
+				rep.Reads++
+				if g.IsGenerated(r) {
+					producer := g.Producer[r]
+					if producer == edge {
+						continue
+					}
+					if upstream == nil {
+						upstream = g.Upstream(edge)
+					}
+					if !upstream[producer] {
+						add(Finding{Kind: KindRace, Step: step, File: rel(r), Producer: rel(producer.Outputs[0])})
+					}
+					continue
+				}
+				// A source file. Steps with a depfile report what they read, so
+				// only steps without one can silently miss an input.
+				if !declared[r] && !hasDepfile && !strings.HasPrefix(rel(r), "CMakeFiles/") {
+					add(Finding{Kind: KindStale, Step: step, File: rel(r)})
+				}
 			}
 		}
 	}
+	rep.Steps = len(steps)
 	sort.Slice(rep.Findings, func(i, j int) bool {
 		a, b := rep.Findings[i], rep.Findings[j]
 		if a.Kind != b.Kind {

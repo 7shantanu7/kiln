@@ -10,7 +10,7 @@
 //     does not declare, so editing that file does not rebuild the output.
 //   - write-outside-build-dir: a step writes into the source tree.
 //
-// Usage: kiln-dep -C build -src . [-clean] [-j 8] [-json report.json]
+// Usage: kiln-dep -C build -src . [-clean] [-j 8] [-json report.json] [targets...]
 // Exit status is 1 when anything is found (use -warn-only to always exit 0).
 package main
 
@@ -37,6 +37,7 @@ func main() {
 	jobs := flag.Int("j", 0, "parallel jobs for Ninja (0 = Ninja's default)")
 	jsonOut := flag.String("json", "", "also write the report as JSON to this file")
 	keepGoing := flag.Bool("keep-going", true, "pass -k 0 to Ninja so one failing step does not stop the trace")
+	maxPasses := flag.Int("passes", 3, "when the build fails, rerun Ninja (traced) up to this many times in total")
 	warnOnly := flag.Bool("warn-only", false, "exit 0 even when undeclared dependencies are found")
 	flag.Parse()
 
@@ -59,18 +60,34 @@ func main() {
 	if *jobs > 0 {
 		argv = append(argv, "-j", strconv.Itoa(*jobs))
 	}
-	fmt.Fprintf(os.Stderr, "kiln-dep: tracing %v\n", argv)
-	res, err := sandbox.Run(buildDir, argv, os.Stderr, os.Stderr)
-	check(err)
-	if res.ExitCode != 0 {
-		fmt.Fprintf(os.Stderr, "kiln-dep: warning: build exited with %d; analysing the steps that ran\n", res.ExitCode)
+	argv = append(argv, flag.Args()...) // targets, built in the order given
+	// A step that hit a race often fails, and Ninja then skips everything
+	// that depends on it. Rerunning lets the failed step succeed now that its
+	// input exists (its read then shows the race) and traces the skipped
+	// steps. A pass that runs no step successfully means real errors: stop.
+	var passes []*sandbox.Result
+	for pass := 1; pass <= *maxPasses; pass++ {
+		fmt.Fprintf(os.Stderr, "kiln-dep: pass %d: tracing %v\n", pass, argv)
+		res, err := sandbox.Run(buildDir, argv, os.Stderr, os.Stderr)
+		check(err)
+		passes = append(passes, res)
+		if res.ExitCode == 0 {
+			break
+		}
+		fmt.Fprintf(os.Stderr, "kiln-dep: pass %d: build exited with %d\n", pass, res.ExitCode)
+		if !madeProgress(res) {
+			break
+		}
+	}
+	if last := passes[len(passes)-1]; last.ExitCode != 0 {
+		fmt.Fprintf(os.Stderr, "kiln-dep: warning: build still fails after %d passes; analysing the steps that ran\n", len(passes))
 	}
 
 	g, err := ninja.Load(buildDir)
 	check(err)
-	rep := depcheck.Check(g, res, srcRoot, commands)
+	rep := depcheck.Check(g, passes, srcRoot, commands)
 
-	fmt.Printf("kiln-dep: traced %d build steps, checked %d reads\n", rep.Steps, rep.Reads)
+	fmt.Printf("kiln-dep: traced %d build steps in %d pass(es), checked %d reads\n", rep.Steps, len(passes), rep.Reads)
 	if rep.Steps == 0 {
 		fmt.Println("kiln-dep: nothing was rebuilt; use -clean to trace a full build")
 	}
@@ -105,6 +122,20 @@ func main() {
 	if len(rep.Findings) > 0 && !*warnOnly {
 		os.Exit(1)
 	}
+}
+
+// madeProgress reports whether any step in the pass wrote a file.
+func madeProgress(res *sandbox.Result) bool {
+	for _, child := range res.Children(res.Root) {
+		for _, p := range res.Subtree(child) {
+			for _, a := range p.Accesses {
+				if a.Write && !a.Missing {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func check(err error) {

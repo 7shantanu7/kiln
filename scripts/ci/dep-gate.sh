@@ -20,9 +20,33 @@ for case in buggy clean; do
   kiln-dep -C "$WORK/$case/build" -src "$WORK/$case/src" -j 1 -warn-only -json "$WORK/$case.json" 2> /dev/null
 done
 
+# A race that always fails the build: a.o includes gen/g.h from a directory
+# that does not exist yet (GCC drops it, so it never even probes for the
+# header), and a.o is declared first, so -j1 runs it first. kiln-dep must
+# rerun the build and report the race from the second pass.
+mkdir -p "$WORK/forced"
+printf '#include "g.h"\nint a() { return G; }\n' > "$WORK/forced/a.cpp"
+printf '#define G 42\n' > "$WORK/forced/g.h.in"
+cat > "$WORK/forced/build.ninja" <<'NINJA'
+rule cc
+  command = c++ -Igen -c $in -o $out -MD -MF $out.d
+  deps = gcc
+  depfile = $out.d
+rule gen
+  command = mkdir -p gen && cp $in $out
+build a.o: cc a.cpp
+build gen/g.h: gen g.h.in
+NINJA
+kiln-dep -C "$WORK/forced" -src "$WORK/forced" -j 1 -warn-only -json "$WORK/forced.json" > /dev/null 2>&1
+
 python3 - "$WORK" <<'EOF'
 import json, sys
 work = sys.argv[1]
+forced = json.load(open(f"{work}/forced.json"))["findings"]
+want_forced = [{"kind": "undeclared-generated-input", "step": "a.o", "file": "gen/g.h", "producer": "gen/g.h"}]
+print(f"forced race: {forced}")
+if forced != want_forced:
+    sys.exit("forced race: expected exactly one race finding for a.o reading gen/g.h")
 want = json.load(open(f"{work}/buggy/src/kiln-fixture.json"))["injected_missing_deps"]
 got = json.load(open(f"{work}/buggy.json"))["findings"]
 # Each injection names the consuming library and the producer (library or file).
