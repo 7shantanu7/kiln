@@ -47,7 +47,7 @@ type Report struct {
 // maps each edge's command line to its first output (see ninja.Commands); it
 // identifies steps that failed before writing anything.
 func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string, commands map[string]string) Report {
-	var rep Report
+	rep := Report{Findings: []Finding{}} // [] rather than null in JSON
 	srcRoot = filepath.Clean(srcRoot)
 	under := func(p, root string) bool { return p == root || strings.HasPrefix(p, root+"/") }
 	inScope := func(p string) bool { return under(p, srcRoot) || under(p, g.Dir) }

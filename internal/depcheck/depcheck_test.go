@@ -65,3 +65,11 @@ func TestCheck(t *testing.T) {
 		t.Errorf("matched %d steps, want 5 (including the failed one)", rep.Steps)
 	}
 }
+
+func TestNoFindingsIsEmptyNotNil(t *testing.T) {
+	g, cmds := testGraph()
+	rep := Check(g, &sandbox.Result{Root: 1, Processes: map[int]*sandbox.Process{1: {Pid: 1}}}, "/s", cmds)
+	if rep.Findings == nil {
+		t.Fatal("Findings must be an empty slice so the JSON report has [] rather than null")
+	}
+}

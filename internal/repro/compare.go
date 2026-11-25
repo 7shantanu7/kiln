@@ -108,7 +108,7 @@ func Compare(a, b Build) (*Report, error) {
 			}
 		}
 	}
-	rep := &Report{}
+	rep := &Report{Diffs: []Diff{}} // [] rather than null in JSON
 	differs := map[string]bool{}
 	var paths []string
 	for f := range files {
