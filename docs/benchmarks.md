@@ -27,6 +27,36 @@ README. It runs on one machine, with nothing else running, in this order:
 Every run must pass all tests (the script stops otherwise), so a cache that
 returned wrong objects would fail the benchmark rather than speed it up.
 
+## Pull request clean builds (`bench/pr-clean.sh`)
+
+The cache hit rate a CI system sees: after `bench.sh`, the cache is warm from
+main. For each of 10 seeded pull requests, editing 1 to 3 files (module
+sources or headers, each a real change):
+
+- copy main into a fresh checkout in a new directory, as CI workspaces are;
+- configure with `kiln.cmake` and `KILN_CACHE_READONLY=ON`, the setting for
+  pull request builds, so one PR never warms the cache for the next;
+- build clean, run every test, and count hits and misses from kiln-cc's log.
+
+Every miss is a translation unit the edit really changed (or one that
+includes a changed header); everything else is served from main's entries.
+
+## kiln-dep and kiln-repro (`bench/analysis.sh`)
+
+On a 60-library fixture (1,020 translation units):
+
+- **Overhead.** The same clean build, plain and under kiln-dep's tracer, on a
+  fixture without injected bugs, so both do identical work.
+- **Accuracy.** kiln-dep on the same shape with 8 injected undeclared
+  dependencies; findings are matched against `kiln-fixture.json`.
+- **Reproducibility.** kiln-repro with every bug injected, then with
+  `-toolchain-fixes`, then on a fixture whose two source bugs are fixed.
+
+## Raw data
+
+`bench/results/` holds the JSON each script wrote for the numbers in the
+README.
+
 ## What the numbers do not show
 
 - One fixture, one machine. A real codebase has different header fan-out,

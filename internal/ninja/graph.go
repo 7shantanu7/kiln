@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // Edge is one build statement.
@@ -92,14 +93,35 @@ func Load(dir string) (*Graph, error) {
 			targets = append(targets, line[:i])
 		}
 	}
-	const batch = 500
-	for i := 0; i < len(targets); i += batch {
-		j := min(i+batch, len(targets))
-		q, err := ninjaTool(abs, append([]string{"-t", "query"}, targets[i:j]...)...)
-		if err != nil {
-			return nil, err
+	// Each `ninja -t query` call re-parses build.ninja, so pass as many
+	// targets per call as the argument limit allows, and run calls in parallel.
+	const batchBytes = 512 << 10
+	var batches [][]string
+	for i := 0; i < len(targets); {
+		j, n := i, 0
+		for j < len(targets) && (j == i || n+len(targets[j])+1 <= batchBytes) {
+			n += len(targets[j]) + 1
+			j++
 		}
-		g.parseQuery(q)
+		batches = append(batches, targets[i:j])
+		i = j
+	}
+	outs := make([][]byte, len(batches))
+	errs := make([]error, len(batches))
+	var wg sync.WaitGroup
+	for i, b := range batches {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			outs[i], errs[i] = ninjaTool(abs, append([]string{"-t", "query"}, b...)...)
+		}()
+	}
+	wg.Wait()
+	for i := range batches {
+		if errs[i] != nil {
+			return nil, errs[i]
+		}
+		g.parseQuery(outs[i]) // in order, so results do not depend on timing
 	}
 	if err := g.loadDeps(); err != nil {
 		return nil, err

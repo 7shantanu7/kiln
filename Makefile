@@ -14,6 +14,8 @@ lint:
 	$(GO) vet ./...
 
 # Full-size benchmark (500 targets, 4,250 translation units).
-# Takes about an hour on 4 cores; results land in .bench-work/results.json.
+# Takes about two hours on 4 cores; results land in .bench-work/.
 bench: build
 	bench/bench.sh .bench-work 20
+	bench/pr-clean.sh .bench-work 10
+	bench/analysis.sh .bench-work/analysis 60

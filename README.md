@@ -54,8 +54,81 @@ kiln-repro -src . -toolchain-fixes       # two builds, explained diff
 
 ## Results
 
-Pending: the full-size benchmark ([docs/benchmarks.md](docs/benchmarks.md)) is
-being run; numbers will be added here only once measured.
+Measured with [bench/](bench/) on a synthetic monorepo from `kiln-gen`
+([docs/fixture.md](docs/fixture.md)): **500 targets, 4,250 translation units,
+147,806 lines of C++**. Machine: 4-core arm64 (Neoverse-N1), GCC 13.3,
+CMake 3.28, Ninja 1.11, Release builds at `-j4`, cache on the same machine.
+Raw data is in [bench/results/](bench/results/); method and caveats in
+[docs/benchmarks.md](docs/benchmarks.md).
+
+### Remote cache (kiln-cache + kiln-cc)
+
+| clean build | wall time | cache |
+|---|---|---|
+| no cache | 13m 15s (795 s) | |
+| empty cache (every compile a miss) | 15m 34s (934 s), **+17%** | 4,250 misses |
+| second checkout in another directory, warm cache | **2m 24s (144 s), 5.5× faster** | **4,250 / 4,250 hits** |
+
+All 250 tests pass on the cached build. The cache held 170 MB. The build
+uses all 4 cores (parallelism 3.99) and its critical path is 20.7 s, so it is
+throughput-bound. A warm build still runs the preprocessor once per file to
+compute the cache key, which is what limits the speedup to 5.5×.
+
+### What CI sees: pull request builds against a cache warmed from main
+
+10 seeded pull requests, each editing 1 to 3 files (sources or headers), each
+built clean in a fresh checkout in a new directory with the cache read-only
+(`bench/pr-clean.sh`):
+
+| | hit rate | clean build |
+|---|---|---|
+| median | **99.4%** | **129 s** (6.2× faster than no cache) |
+| worst (3 widely included headers) | **98.0%** (86 of 4,250 missed) | 140 s |
+| best (one `.cpp`) | 99.98% (1 missed) | 124 s |
+| all 10 pooled | 99.3% | |
+
+Every miss is a file the change really affects. All tests passed on every build.
+
+### Test impact analysis (kiln-tia)
+
+20 seeded one-file pull requests (half `.cpp`, half header edits) on the warm
+checkout:
+
+| median per PR | all tests | kiln-tia selected |
+|---|---|---|
+| tests run | 250 | 27.5 |
+| test time | 4.05 s | **0.49 s** |
+| kiln-tia analysis | | 1.60 s |
+| incremental build + analysis + tests | 8.73 s | **6.65 s** |
+
+Selections ranged from 2 tests (a header in a leaf library) to 200 (a `.cpp`
+in a library almost everything links). The fixture's whole suite takes 4 s,
+so the absolute saving is small; it grows with test suite cost. (kiln-tia was
+re-timed after a change that batches its Ninja queries: 3.76 s before, with
+identical selections; `bench/results/prs-tia-v2.jsonl`.)
+
+### Undeclared dependencies (kiln-dep)
+
+On a 60-library fixture (1,020 translation units, 1,146 build steps):
+
+| | result |
+|---|---|
+| tracing overhead, clean build at `-j4` | 186 s → 222 s, **+19%** |
+| fixture with no injected bugs | 33,421 reads checked, **0 findings** |
+| fixture with 8 injected undeclared dependencies | **8 found, 8 matched, 0 false positives** |
+
+### Reproducibility (kiln-repro)
+
+Same 60-library shape, `RelWithDebInfo`, all reproducibility bugs injected:
+
+| run | files compared | differ | root causes | cause kinds |
+|---|---|---|---|---|
+| plain | 1,147 | 1,147 | 1,020 | all 6: debug-info paths (1,013), `__FILE__` (12), generator order (6), `__DATE__`/`__TIME__` (2), configure timestamp (1), configured build path (1) |
+| `-toolchain-fixes` | 1,147 | 79 | 7 | the 2 that need source changes: generator order (6), configured build path (1) |
+| source bugs fixed + `-toolchain-fixes` | 1,147 | **0** | 0 | bit-for-bit identical |
+
+The 72 non-root differences with toolchain fixes on are archives and
+executables containing those 7 files.
 
 ## Testing
 

@@ -13,6 +13,7 @@
 # Results go to WORK_DIR/results.json and are printed as a table. Every number
 # comes from this run; nothing is estimated.
 set -euo pipefail
+command -v go > /dev/null || export PATH="/usr/local/go/bin:$PATH"
 
 WORK=${1:?usage: bench/bench.sh WORK_DIR [PRS]}
 PRS=${2:-20}

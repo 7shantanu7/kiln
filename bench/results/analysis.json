@@ -1,0 +1,51 @@
+{
+  "fixture": {
+    "targets": 120,
+    "translation_units": 1020
+  },
+  "dep_overhead": {
+    "plain_build_s": 186.18,
+    "traced_build_s": 222.38,
+    "overhead_pct": 19.4,
+    "steps_traced": 1146,
+    "reads_checked": 33421,
+    "findings_on_clean_fixture": 0
+  },
+  "dep_findings": {
+    "injected": 8,
+    "found": 8,
+    "matched": 8,
+    "false_positives": 0,
+    "steps_traced": 1146
+  },
+  "repro": {
+    "plain": {
+      "compared": 1147,
+      "differ": 1147,
+      "root_causes": 1020,
+      "cause_kinds": [
+        "absolute-path-in-debug-info",
+        "build-date-time",
+        "build-path-in-program-data",
+        "embedded-timestamp",
+        "source-path-in-program-data",
+        "unstable-generator-order"
+      ]
+    },
+    "toolchain_fixes": {
+      "compared": 1147,
+      "differ": 79,
+      "root_causes": 7,
+      "cause_kinds": [
+        "build-path-in-program-data",
+        "unstable-generator-order"
+      ]
+    },
+    "source_and_toolchain_fixes": {
+      "compared": 1147,
+      "differ": 0,
+      "root_causes": 0,
+      "cause_kinds": []
+    }
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "prs": 10,
+  "median_hit_rate": 99.375,
+  "worst_hit_rate": 97.98,
+  "best_hit_rate": 99.98,
+  "pooled_hit_rate": 99.29,
+  "median_build_s": 129.075,
+  "worst_build_s": 139.69,
+  "per_pr": [
+    {
+      "files": [
+        "libs/lib_0131/include/lib_0131/m15.h",
+        "libs/lib_0218/src/m06.cpp",
+        "libs/lib_0221/src/m14.cpp"
+      ],
+      "hits": 4214,
+      "misses": 36,
+      "errors": 0,
+      "hit_rate": 99.15,
+      "build_s": 131.1
+    },
+    {
+      "files": [
+        "libs/lib_0024/src/m14.cpp"
+      ],
+      "hits": 4249,
+      "misses": 1,
+      "errors": 0,
+      "hit_rate": 99.98,
+      "build_s": 123.97
+    },
+    {
+      "files": [
+        "libs/lib_0137/include/lib_0137/m01.h"
+      ],
+      "hits": 4216,
+      "misses": 34,
+      "errors": 0,
+      "hit_rate": 99.2,
+      "build_s": 130.9
+    },
+    {
+      "files": [
+        "libs/lib_0157/include/lib_0157/m05.h",
+        "libs/lib_0212/src/m02.cpp",
+        "libs/lib_0246/include/lib_0246/m14.h"
+      ],
+      "hits": 4245,
+      "misses": 5,
+      "errors": 0,
+      "hit_rate": 99.88,
+      "build_s": 124.31
+    },
+    {
+      "files": [
+        "libs/lib_0225/include/lib_0225/m07.h"
+      ],
+      "hits": 4200,
+      "misses": 50,
+      "errors": 0,
+      "hit_rate": 98.82,
+      "build_s": 133.57
+    },
+    {
+      "files": [
+        "libs/lib_0050/include/lib_0050/m07.h",
+        "libs/lib_0083/include/lib_0083/m14.h",
+        "libs/lib_0127/include/lib_0127/m00.h"
+      ],
+      "hits": 4164,
+      "misses": 86,
+      "errors": 0,
+      "hit_rate": 97.98,
+      "build_s": 139.69
+    },
+    {
+      "files": [
+        "libs/lib_0080/include/lib_0080/m07.h",
+        "libs/lib_0141/include/lib_0141/m02.h",
+        "libs/lib_0167/src/m08.cpp"
+      ],
+      "hits": 4197,
+      "misses": 53,
+      "errors": 0,
+      "hit_rate": 98.75,
+      "build_s": 133.09
+    },
+    {
+      "files": [
+        "libs/lib_0017/src/m03.cpp"
+      ],
+      "hits": 4249,
+      "misses": 1,
+      "errors": 0,
+      "hit_rate": 99.98,
+      "build_s": 124.65
+    },
+    {
+      "files": [
+        "libs/lib_0098/include/lib_0098/m02.h",
+        "libs/lib_0216/src/m00.cpp"
+      ],
+      "hits": 4231,
+      "misses": 19,
+      "errors": 0,
+      "hit_rate": 99.55,
+      "build_s": 127.05
+    },
+    {
+      "files": [
+        "libs/lib_0120/include/lib_0120/m12.h"
+      ],
+      "hits": 4232,
+      "misses": 18,
+      "errors": 0,
+      "hit_rate": 99.58,
+      "build_s": 127.25
+    }
+  ]
+}

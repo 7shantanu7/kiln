@@ -13,6 +13,7 @@
 #
 # Results go to WORK_DIR/analysis.json.
 set -euo pipefail
+command -v go > /dev/null || export PATH="/usr/local/go/bin:$PATH"
 
 WORK=${1:?usage: bench/analysis.sh WORK_DIR [LIBS]}
 LIBS=${2:-60}
