@@ -53,17 +53,35 @@ func TestTraceShellCommand(t *testing.T) {
 	}
 }
 
-func TestFailedOpenIsNotRecorded(t *testing.T) {
+func TestFailedOpenIsMarkedMissing(t *testing.T) {
 	dir := t.TempDir()
 	res, err := Run(dir, []string{"/bin/sh", "-c", "cat missing.txt 2>/dev/null; true"}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	found := false
 	for _, p := range res.Subtree(res.Root) {
 		for _, a := range p.Accesses {
 			if filepath.Base(a.Path) == "missing.txt" {
-				t.Fatalf("recorded a failed open: %+v", a)
+				if !a.Missing || a.Write {
+					t.Fatalf("failed open recorded as %+v", a)
+				}
+				found = true
 			}
 		}
+	}
+	if !found {
+		t.Fatal("failed open of missing.txt not recorded")
+	}
+}
+
+func TestArgvIsFirstExec(t *testing.T) {
+	// sh -c with a single command execs it in place; Argv must stay sh's.
+	res, err := Run(t.TempDir(), []string{"/bin/sh", "-c", "exec /bin/true"}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if argv := res.Processes[res.Root].Argv; len(argv) < 3 || argv[0] != "/bin/sh" {
+		t.Fatalf("root argv = %v", argv)
 	}
 }

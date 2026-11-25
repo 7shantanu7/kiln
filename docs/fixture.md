@@ -30,8 +30,9 @@ The fixture is deterministic for a given `-seed`.
 
 1. **Generated-header race.** A library includes another library's generated
    header and adds that library's generated include directory by hand,
-   without depending on it. With `-j1` Ninja happens to build the producer
-   first; a parallel clean build can fail.
+   without depending on it. Whether a clean build fails depends on the order
+   Ninja happens to pick, even with `-j1`, which is the point: it can pass
+   locally and fail in CI.
 2. **Undeclared codegen input.** A `.def` file includes a shared `.def` the
    custom command does not list in `DEPENDS`. Editing the shared file does not
    regenerate the header.

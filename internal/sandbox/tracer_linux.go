@@ -16,16 +16,17 @@ import (
 
 // Access is one successful open or rename observed in a traced process.
 type Access struct {
-	Path  string // absolute, cleaned
-	Write bool   // opened for writing, created, or renamed into place
-	Dir   bool   // opened with O_DIRECTORY
+	Path    string // absolute, cleaned
+	Write   bool   // opened for writing, created, or renamed into place
+	Dir     bool   // opened with O_DIRECTORY
+	Missing bool   // a read-only open that failed with ENOENT
 }
 
 // Process is one traced process (or thread).
 type Process struct {
 	Pid      int
-	Parent   int // 0 for the root
-	Argv     []string
+	Parent   int      // 0 for the root
+	Argv     []string // command line of the first exec
 	Accesses []Access
 }
 
@@ -173,10 +174,17 @@ func Run(dir string, argv []string, stdout, stderr *os.File) (*Result, error) {
 		case sig == unix.SIGTRAP|0x80: // syscall stop (PTRACE_O_TRACESYSGOOD)
 			if p := inflight[pid]; p != nil {
 				delete(inflight, pid)
-				if r, err := getRegs(pid); err == nil && r.ret() >= 0 {
-					pr := proc(pid)
-					for _, path := range p.paths {
-						pr.Accesses = append(pr.Accesses, Access{Path: path, Write: p.write, Dir: p.dir})
+				if r, err := getRegs(pid); err == nil {
+					// Successful calls are accesses. A read that failed with
+					// ENOENT is kept too: a step probing for a generated file
+					// before it exists is evidence of a missing dependency.
+					ok := r.ret() >= 0
+					missing := r.ret() == -int64(unix.ENOENT) && !p.write
+					if ok || missing {
+						pr := proc(pid)
+						for _, path := range p.paths {
+							pr.Accesses = append(pr.Accesses, Access{Path: path, Write: p.write, Dir: p.dir, Missing: missing})
+						}
 					}
 				}
 			}
@@ -192,7 +200,9 @@ func Run(dir string, argv []string, stdout, stderr *os.File) (*Result, error) {
 			if msg, err := unix.PtraceGetEventMsg(pid); err == nil && int(msg) != pid {
 				delete(live, int(msg))
 			}
-			proc(pid).Argv = readCmdline(pid)
+			if pr := proc(pid); pr.Argv == nil {
+				pr.Argv = readCmdline(pid)
+			}
 		case sig == unix.SIGTRAP && cause == 0:
 			// plain SIGTRAP from an exec without PTRACE_O_TRACEEXEC: swallow
 		default:

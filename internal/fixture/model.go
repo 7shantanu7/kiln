@@ -87,9 +87,9 @@ type Repo struct {
 
 // Injection records one deliberately injected missing dependency.
 type Injection struct {
-	Kind     string // "generated-header-race" or "undeclared-codegen-input"
-	Consumer string
-	Producer string
+	Kind     string `json:"kind"` // "generated-header-race" or "undeclared-codegen-input"
+	Consumer string `json:"consumer"`
+	Producer string `json:"producer"`
 }
 
 func splitmix64(x uint64) uint64 {

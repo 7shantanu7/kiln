@@ -15,7 +15,8 @@ for case in buggy clean; do
   inject=$([ "$case" = buggy ] && echo 6 || echo 0)
   kiln-gen -out "$WORK/$case/src" -libs 40 -modules 3 -test-reps 10 -missing-deps "$inject" > /dev/null
   cmake -S "$WORK/$case/src" -B "$WORK/$case/build" -G Ninja -DCMAKE_BUILD_TYPE=Release > /dev/null
-  # -j1 keeps the build order deterministic, so injected races cannot fail the build.
+  # Injected races may make the build fail; kiln-dep keeps going (-k 0) and
+  # still reports them, so ignore the build's own exit status here.
   kiln-dep -C "$WORK/$case/build" -src "$WORK/$case/src" -j 1 -warn-only -json "$WORK/$case.json" 2> /dev/null
 done
 

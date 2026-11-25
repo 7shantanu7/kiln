@@ -5,6 +5,7 @@ package ninja
 import (
 	"bufio"
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -293,4 +294,35 @@ func ReadLog(dir string) (map[string]LogEntry, error) {
 		out[p] = LogEntry{StartMs: start, EndMs: end, Output: p}
 	}
 	return out, sc.Err()
+}
+
+// Commands maps each edge's command line, exactly as Ninja runs it with
+// /bin/sh -c, to the edge's first output (absolute). It reads `ninja -t compdb`,
+// which lists every edge with a command.
+func Commands(dir string) (map[string]string, error) {
+	abs, _ := filepath.Abs(dir)
+	out, err := ninjaTool(abs, "-t", "compdb")
+	if err != nil {
+		return nil, err
+	}
+	var entries []struct {
+		Directory string `json:"directory"`
+		Command   string `json:"command"`
+		Output    string `json:"output"`
+	}
+	if err := json.Unmarshal(out, &entries); err != nil {
+		return nil, fmt.Errorf("ninja -t compdb: %v", err)
+	}
+	m := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if e.Output == "" {
+			continue
+		}
+		o := e.Output
+		if !filepath.IsAbs(o) {
+			o = filepath.Join(abs, o)
+		}
+		m[e.Command] = filepath.Clean(o)
+	}
+	return m, nil
 }

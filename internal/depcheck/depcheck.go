@@ -29,6 +29,9 @@ type Finding struct {
 	Step     string `json:"step"`               // first output of the step, relative to the build dir
 	File     string `json:"file"`               // file read or written
 	Producer string `json:"producer,omitempty"` // step that generates File (races only)
+	// Missing is set when the step looked for File before it had been
+	// generated: the race already happened in the traced build.
+	Missing bool `json:"missing,omitempty"`
 }
 
 // Report is the outcome of a check.
@@ -40,8 +43,10 @@ type Report struct {
 }
 
 // Check matches traced processes to edges and reports undeclared dependencies.
-// Only files under srcRoot or the build directory are considered.
-func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string) Report {
+// Only files under srcRoot or the build directory are considered. commands
+// maps each edge's command line to its first output (see ninja.Commands); it
+// identifies steps that failed before writing anything.
+func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string, commands map[string]string) Report {
 	var rep Report
 	srcRoot = filepath.Clean(srcRoot)
 	under := func(p, root string) bool { return p == root || strings.HasPrefix(p, root+"/") }
@@ -64,20 +69,26 @@ func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string) Report {
 	// Each child of the root process (Ninja) runs one build step.
 	seen := map[string]bool{}
 	for _, child := range res.Children(res.Root) {
-		var reads, writes []string
+		var reads, writes, missing []string
 		for _, p := range res.Subtree(child) {
 			for _, a := range p.Accesses {
 				if a.Dir || !inScope(a.Path) || ignored(a.Path) {
 					continue
 				}
-				if a.Write {
+				switch {
+				case a.Missing:
+					missing = append(missing, a.Path)
+				case a.Write:
 					writes = append(writes, a.Path)
-				} else {
+				default:
 					reads = append(reads, a.Path)
 				}
 			}
 		}
-		edge := matchEdge(g, writes)
+		edge := matchCommand(g, commands, res.Processes[child])
+		if edge == nil {
+			edge = matchEdge(g, writes)
+		}
 		if edge == nil {
 			if len(reads)+len(writes) > 0 {
 				rep.Unmatched++
@@ -112,6 +123,18 @@ func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string) Report {
 		for _, w := range writes {
 			if !under(w, g.Dir) {
 				add(Finding{Kind: KindOutsideWrite, Step: step, File: rel(w)})
+			}
+		}
+		for _, m := range dedupe(missing) {
+			producer, ok := g.Producer[m]
+			if !ok || producer.Phony() || producer == edge {
+				continue
+			}
+			if upstream == nil {
+				upstream = g.Upstream(edge)
+			}
+			if !upstream[producer] {
+				add(Finding{Kind: KindRace, Step: step, File: rel(m), Producer: rel(producer.Outputs[0]), Missing: true})
 			}
 		}
 		for _, r := range dedupe(reads) {
@@ -150,6 +173,20 @@ func Check(g *ninja.Graph, res *sandbox.Result, srcRoot string) Report {
 		return a.File < b.File
 	})
 	return rep
+}
+
+// matchCommand finds the edge whose command the process ran: Ninja starts
+// every step as /bin/sh -c "<command>".
+func matchCommand(g *ninja.Graph, commands map[string]string, p *sandbox.Process) *ninja.Edge {
+	if p == nil || len(p.Argv) < 3 || p.Argv[1] != "-c" {
+		return nil
+	}
+	if out, ok := commands[p.Argv[2]]; ok {
+		if e, ok := g.Producer[out]; ok && !e.Phony() {
+			return e
+		}
+	}
+	return nil
 }
 
 // matchEdge finds the edge whose outputs the step wrote.

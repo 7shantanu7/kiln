@@ -79,14 +79,23 @@ memory (`process_vm_readv`), resolves it against the process's working
 directory or `dirfd` via `/proc`, and resumes to the syscall exit to record
 only successful calls.
 
-Each child of Ninja is one build step; it is matched to its Ninja edge by
-the outputs it wrote. Then, for every file a step read under the source or
+Ninja runs with `-k 0`, so a step that fails (often because of the very
+race being looked for) does not stop the rest of the build from being traced.
+Read-only opens that fail with `ENOENT` are recorded as well: a compiler
+probing for a generated header that does not exist yet is direct evidence of a
+race.
+
+Each child of Ninja is one build step. Ninja starts every step as
+`/bin/sh -c "<command>"`, so the step is matched to its edge by that command
+line, using `ninja -t compdb`; a step that failed before writing anything
+is still identified. Then, for every file a step opened under the source or
 build directory:
 
 - **Generated file, producer not upstream.** If the producing edge is not
   reachable through the step's explicit, implicit or order-only inputs, a
   clean parallel build can run the step first. Depfile dependencies do not
-  count: they are only known after the step has run once.
+  count: they are only known after the step has run once. This applies both
+  to files the step read and to generated files it looked for and did not find.
 - **Source file, no depfile.** Steps without a depfile (custom commands) must
   declare every input. A file they read but do not list will not trigger a
   rebuild when edited.
