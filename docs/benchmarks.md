@@ -11,8 +11,10 @@ README. It runs on one machine, with nothing else running, in this order:
    `kiln.cmake`, build clean. Every compile is a miss: this measures kiln-cc's
    overhead (a preprocessor run and an upload per file).
 4. **Warm cache.** Configure checkout B, a copy of the sources in a different
-   directory, and build clean. The hit rate comes from kiln-cc's per-invocation
-   log, not from the server.
+   directory, and build clean. The hit rate, and how many hits direct mode
+   found without preprocessing, come from kiln-cc's per-invocation log, not
+   from the server. Checkout A's cold build recorded the direct-mode
+   manifests, so this is what any later checkout of the same commit sees.
 5. **Pull requests.** On checkout B, `PRS` (default 20) seeded one-file edits:
    half to a module's `.cpp`, half to a module's header, each adding a real
    definition so the file recompiles. For each:
@@ -61,6 +63,9 @@ README.
 
 - One fixture, one machine. A real codebase has different header fan-out,
   compile times and test runtimes.
+- Before direct mode (commit 6c5ab44) the warm build took 144 s (5.5×) and pull
+  request clean builds a median 129 s; those runs are in the git history of
+  `bench/results/`.
 - The cache and the build share the machine over loopback. A remote cache adds
   network latency to every lookup and download.
 - Test times depend on the fixture's `-test-reps`; they are long enough to

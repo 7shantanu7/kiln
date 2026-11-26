@@ -45,7 +45,9 @@ outcomes() { # summarise a kiln-cc JSON-lines log
 import json, sys, collections
 c = collections.Counter(json.loads(l)["outcome"] for l in open(sys.argv[1]))
 total = c["hit"] + c["miss"]
-print(json.dumps({"hit": c["hit"], "miss": c["miss"], "skip": c["skip"], "error": c["error"],
+rows = [json.loads(l) for l in open(sys.argv[1])]
+direct = sum(1 for r in rows if r.get("mode") == "direct")
+print(json.dumps({"hit": c["hit"], "direct_hit": direct, "miss": c["miss"], "skip": c["skip"], "error": c["error"],
                   "hit_rate": round(100 * c["hit"] / total, 1) if total else 0}))
 EOF
 }

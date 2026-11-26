@@ -31,13 +31,15 @@ type Options struct {
 	BaseDirs []string // path prefixes rewritten so different checkouts share entries
 	ReadOnly bool     // never upload (for untrusted builds such as pull requests)
 	LogPath  string   // optional JSON-lines log of every invocation
+	NoDirect bool     // always preprocess to compute the key (disables direct mode)
 	Timeout  time.Duration
 }
 
 // Result is what one invocation did; it is written to the log.
 type Result struct {
 	Source  string  `json:"source,omitempty"`
-	Outcome string  `json:"outcome"` // hit, miss, skip, error
+	Outcome string  `json:"outcome"`        // hit, miss, skip, error
+	Mode    string  `json:"mode,omitempty"` // for hits: direct (no preprocessing) or preprocessed
 	Reason  string  `json:"reason,omitempty"`
 	Millis  float64 `json:"ms"`
 	Exit    int     `json:"exit"`
@@ -72,8 +74,9 @@ func run(opts Options, argv []string) Result {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), opts.Timeout)
 	defer cancel()
+	began := time.Now()
 
-	key, err := ComputeKey(c, opts.BaseDirs)
+	kb, err := newKeyBase(c, opts.BaseDirs)
 	if err != nil {
 		return Result{Source: c.Source, Outcome: "error", Reason: "key: " + err.Error(), Exit: passthrough(argv)}
 	}
@@ -83,13 +86,42 @@ func run(opts Options, argv []string) Result {
 	}
 	defer client.Close()
 
+	// Direct mode: find the key through a manifest of the source's includes,
+	// without running the preprocessor.
+	var dk *directKey
+	if !opts.NoDirect {
+		if dk, err = kb.directKey(c); err != nil {
+			warn("direct mode unavailable: %v", err)
+			dk = nil
+		} else if action, err := dk.lookup(ctx, client); err != nil {
+			warn("manifest lookup failed: %v", err)
+		} else if action != nil {
+			if ar, ok, err := client.GetActionResult(ctx, action); err == nil && ok {
+				if err := restore(ctx, client, c, kb.pm, ar); err == nil {
+					return Result{Source: c.Source, Outcome: "hit", Mode: "direct", Exit: 0}
+				}
+			}
+		}
+	}
+
+	key, pre, err := kb.preprocessedKey(c)
+	if err != nil {
+		return Result{Source: c.Source, Outcome: "error", Reason: "key: " + err.Error(), Exit: passthrough(argv)}
+	}
+	remember := func() {
+		if dk != nil && !opts.ReadOnly {
+			if err := dk.record(ctx, client, c, kb, key.Action, pre, began); err != nil {
+				warn("manifest update failed: %v", err)
+			}
+		}
+	}
+
 	if ar, ok, err := client.GetActionResult(ctx, key.Action); err != nil {
 		warn("cache lookup failed, compiling locally: %v", err)
 	} else if ok {
-		if err := restore(ctx, client, c, key, ar); err == nil {
-			os.Stdout.Write(ar.StdoutRaw)
-			os.Stderr.Write(ar.StderrRaw)
-			return Result{Source: c.Source, Outcome: "hit", Exit: 0}
+		if err := restore(ctx, client, c, kb.pm, ar); err == nil {
+			remember()
+			return Result{Source: c.Source, Outcome: "hit", Mode: "preprocessed", Exit: 0}
 		} else {
 			warn("cache restore failed, compiling locally: %v", err)
 		}
@@ -109,6 +141,7 @@ func run(opts Options, argv []string) Result {
 		warn("cache upload failed: %v", err)
 		return Result{Source: c.Source, Outcome: "miss", Reason: "upload: " + err.Error(), Exit: 0}
 	}
+	remember()
 	return Result{Source: c.Source, Outcome: "miss", Exit: 0}
 }
 
@@ -153,67 +186,98 @@ const (
 	outDep = "out.d"
 )
 
-// ComputeKey preprocesses the source and builds the REAPI Action for it.
-func ComputeKey(c *Compile, baseDirs []string) (*Key, error) {
-	pm := newPathMap(baseDirs)
-	var pre, preErr bytes.Buffer
-	if code := runWith(append([]string{c.Compiler}, c.PreprocessArgs()...), &pre, &preErr); code != 0 {
-		return nil, fmt.Errorf("preprocessing failed: %s", firstLine(preErr.String()))
-	}
-	normPre := pm.normalizeLineMarkers(pre.Bytes())
+// keyBase is what both cache keys share: the compiler's identity and the
+// arguments with output names and base directories normalized.
+type keyBase struct {
+	pm   *pathMap
+	args []string
+	env  []*repb.Command_EnvironmentVariable
+}
 
+func newKeyBase(c *Compile, baseDirs []string) (*keyBase, error) {
+	kb := &keyBase{pm: newPathMap(baseDirs)}
 	compilerID, err := compilerIdentity(c.Compiler)
 	if err != nil {
 		return nil, err
 	}
-	args := []string{Version, compilerID}
+	kb.args = []string{Version, compilerID}
 	for i := 0; i < len(c.Args); i++ {
 		a := c.Args[i]
 		switch {
 		case a == "-o" || a == "-MF":
-			args = append(args, a, "@OUTPUT@")
+			kb.args = append(kb.args, a, "@OUTPUT@")
 			i++
 			continue
 		case strings.HasPrefix(a, "-o") && len(a) > 2 && !strings.HasPrefix(a, "-objc"):
-			args = append(args, "-o@OUTPUT@")
+			kb.args = append(kb.args, "-o@OUTPUT@")
 			continue
 		}
-		args = append(args, pm.normalize(a))
+		kb.args = append(kb.args, kb.pm.normalize(a))
+	}
+	// Debug info records the working directory and absolute paths unless every
+	// base directory is remapped, so such objects are only shared by builds
+	// in the same location.
+	if c.HasDebugInfo() && !kb.pm.coveredBy(c.PrefixMaps()) {
+		cwd, _ := os.Getwd()
+		kb.env = append(kb.env,
+			&repb.Command_EnvironmentVariable{Name: "KILN_CWD", Value: cwd},
+			&repb.Command_EnvironmentVariable{Name: "KILN_BASE_DIRS", Value: strings.Join(baseDirs, ":")})
+	}
+	return kb, nil
+}
+
+// actionDigest builds an Action whose input root holds one file.
+func actionDigest(cmd *repb.Command, name string, content *repb.Digest) (*repb.Digest, [][]byte, error) {
+	cmdDigest, cmdBytes, err := remote.DigestProto(cmd)
+	if err != nil {
+		return nil, nil, err
+	}
+	root := &repb.Directory{Files: []*repb.FileNode{{Name: name, Digest: content}}}
+	rootDigest, rootBytes, err := remote.DigestProto(root)
+	if err != nil {
+		return nil, nil, err
+	}
+	action := &repb.Action{CommandDigest: cmdDigest, InputRootDigest: rootDigest}
+	d, actionBytes, err := remote.DigestProto(action)
+	if err != nil {
+		return nil, nil, err
+	}
+	return d, [][]byte{cmdBytes, rootBytes, actionBytes}, nil
+}
+
+// ComputeKey preprocesses the source and builds the REAPI Action for it.
+func ComputeKey(c *Compile, baseDirs []string) (*Key, error) {
+	kb, err := newKeyBase(c, baseDirs)
+	if err != nil {
+		return nil, err
+	}
+	k, _, err := kb.preprocessedKey(c)
+	return k, err
+}
+
+// preprocessedKey runs the preprocessor and keys the compile on its output
+// (with base directories normalized in line markers). It also returns the raw
+// output, whose line markers list every file the compile read.
+func (kb *keyBase) preprocessedKey(c *Compile) (*Key, []byte, error) {
+	var pre, preErr bytes.Buffer
+	if code := runWith(append([]string{c.Compiler}, c.PreprocessArgs()...), &pre, &preErr); code != 0 {
+		return nil, nil, fmt.Errorf("preprocessing failed: %s", firstLine(preErr.String()))
 	}
 	cmd := &repb.Command{
-		Arguments:   args,
-		OutputPaths: []string{outObj},
+		Arguments:            kb.args,
+		EnvironmentVariables: kb.env,
+		OutputPaths:          []string{outObj},
 		Platform: &repb.Platform{Properties: []*repb.Platform_Property{
 			{Name: "ISA", Value: runtime.GOARCH}, {Name: "OSFamily", Value: runtime.GOOS}}},
 	}
 	if c.DepFile != "" {
 		cmd.OutputPaths = append(cmd.OutputPaths, outDep)
 	}
-	// Debug info records the working directory and absolute paths unless every
-	// base directory is remapped, so such objects are only shared by builds
-	// in the same location.
-	if c.HasDebugInfo() && !pm.coveredBy(c.PrefixMaps()) {
-		cwd, _ := os.Getwd()
-		cmd.EnvironmentVariables = append(cmd.EnvironmentVariables,
-			&repb.Command_EnvironmentVariable{Name: "KILN_CWD", Value: cwd},
-			&repb.Command_EnvironmentVariable{Name: "KILN_BASE_DIRS", Value: strings.Join(baseDirs, ":")})
-	}
-	cmdDigest, cmdBytes, err := remote.DigestProto(cmd)
+	d, blobs, err := actionDigest(cmd, "source.ii", remote.Digest(kb.pm.normalizeLineMarkers(pre.Bytes())))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	srcDigest := remote.Digest(normPre)
-	root := &repb.Directory{Files: []*repb.FileNode{{Name: "source.ii", Digest: srcDigest}}}
-	rootDigest, rootBytes, err := remote.DigestProto(root)
-	if err != nil {
-		return nil, err
-	}
-	action := &repb.Action{CommandDigest: cmdDigest, InputRootDigest: rootDigest}
-	actionDigest, actionBytes, err := remote.DigestProto(action)
-	if err != nil {
-		return nil, err
-	}
-	return &Key{Action: actionDigest, Blobs: [][]byte{cmdBytes, rootBytes, actionBytes}, baseMap: pm}, nil
+	return &Key{Action: d, Blobs: blobs, baseMap: kb.pm}, pre.Bytes(), nil
 }
 
 func firstLine(s string) string {
@@ -223,31 +287,30 @@ func firstLine(s string) string {
 	return s
 }
 
-func restore(ctx context.Context, client *remote.Client, c *Compile, key *Key, ar *repb.ActionResult) error {
+// restore writes a cached result's outputs and replays its compiler output.
+func restore(ctx context.Context, client *remote.Client, c *Compile, pm *pathMap, ar *repb.ActionResult) error {
 	if ar.ExitCode != 0 {
 		return fmt.Errorf("cached result has exit code %d", ar.ExitCode)
 	}
-	files := map[string]*repb.Digest{}
-	var digests []*repb.Digest
-	for _, f := range ar.OutputFiles {
-		files[f.Path] = f.Digest
-		digests = append(digests, f.Digest)
-	}
-	if files[outObj] == nil || (c.DepFile != "" && files[outDep] == nil) {
-		return errors.New("cached result is missing outputs")
-	}
-	blobs, err := client.Download(ctx, digests)
+	stdout, stderr, files, err := client.ResultBlobs(ctx, ar)
 	if err != nil {
 		return err
 	}
-	if err := writeAtomic(c.Output, blobs[files[outObj].Hash]); err != nil {
+	obj, ok := files[outObj]
+	dep, hasDep := files[outDep]
+	if !ok || (c.DepFile != "" && !hasDep) {
+		return errors.New("cached result is missing outputs")
+	}
+	if err := writeAtomic(c.Output, obj); err != nil {
 		return err
 	}
 	if c.DepFile != "" {
-		if err := writeAtomic(c.DepFile, key.baseMap.denormalize(blobs[files[outDep].Hash])); err != nil {
+		if err := writeAtomic(c.DepFile, pm.denormalize(dep)); err != nil {
 			return err
 		}
 	}
+	os.Stdout.Write(stdout)
+	os.Stderr.Write(stderr)
 	return nil
 }
 

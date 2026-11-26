@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds a fixture twice, from two checkouts in different directories, through
 # kiln.cmake and a REAPI cache. Fails unless the second build is 100% cache
-# hits, tests pass in both, and every object file matches.
+# hits, all found in direct mode (without running the preprocessor), tests
+# pass in both, and every object file matches.
 #
 #   scripts/ci/cache-roundtrip.sh WORK_DIR [cmake args...]
 #
@@ -20,8 +21,9 @@ mkdir -p "$WORK/bb"
 cp -a "$WORK/a/src" "$WORK/bb/src"
 
 if [ -z "${CACHE_ADDR:-}" ]; then
-  kiln-cache -dir "$WORK/cache" -listen 127.0.0.1:18980 -metrics "" &
-  trap 'kill $! 2>/dev/null || true' EXIT
+  kiln-cache -dir "$WORK/cache" -listen 127.0.0.1:18980 -metrics "" > "$WORK/kiln-cache.log" 2>&1 &
+  CACHE_PID=$!
+  trap 'kill $CACHE_PID 2>/dev/null || true' EXIT
   CACHE_ADDR=127.0.0.1:18980
   sleep 1
 fi
@@ -41,6 +43,11 @@ for path, want in zip(sys.argv[1:], ("miss", "hit")):
     print(f"{path}: {dict(c)}")
     if set(c) != {want}:
         sys.exit(f"expected only '{want}' outcomes in {path}")
+# Hits in the second checkout must come from direct mode (no preprocessor run).
+modes = collections.Counter(json.loads(l).get("mode") for l in open(sys.argv[2]))
+print(f"hit modes: {dict(modes)}")
+if set(modes) != {"direct"}:
+    sys.exit("expected every hit in the second checkout to be a direct-mode hit")
 EOF
 
 diffs=0

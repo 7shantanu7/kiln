@@ -73,6 +73,61 @@ jobs:
           CACHE_ADDR: 127.0.0.1:9092
         run: scripts/ci/cache-roundtrip.sh "$RUNNER_TEMP/roundtrip" -DCMAKE_BUILD_TYPE=Release
 
+  buildbarn:
+    name: interop (buildbarn)
+    needs: go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get install -y ninja-build
+      - run: make build
+      - name: Start bb-storage
+        run: |
+          mkdir -p "$RUNNER_TEMP/bb/cs" "$RUNNER_TEMP/bb/cms" "$RUNNER_TEMP/bb/ac"
+          chmod -R 777 "$RUNNER_TEMP/bb"
+          docker run -d --name bb-storage -p 127.0.0.1:8980:8980 \
+            -v "$PWD/scripts/ci/buildbarn:/config:ro" -v "$RUNNER_TEMP/bb:/storage" \
+            ghcr.io/buildbarn/bb-storage:20261102T091443Z-ca3d8b4 /config/storage.jsonnet
+          sleep 3
+          docker ps --filter name=bb-storage --filter status=running | grep -q bb-storage || { docker logs bb-storage; exit 1; }
+      - name: kiln-cc against buildbarn
+        env:
+          CACHE_ADDR: 127.0.0.1:8980
+        run: scripts/ci/cache-roundtrip.sh "$RUNNER_TEMP/roundtrip" -DCMAKE_BUILD_TYPE=Release
+
+  cross:
+    name: aarch64 cross-build, tests under QEMU
+    needs: go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get install -y ninja-build g++-aarch64-linux-gnu qemu-user-static
+      - run: make build
+      - name: Cross-compiled checkouts share the cache; tests pass under emulation
+        run: |
+          scripts/ci/cache-roundtrip.sh "$RUNNER_TEMP/roundtrip" -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$PWD/cmake/toolchains/aarch64-linux-gnu.cmake"
+          file "$RUNNER_TEMP/roundtrip/bb/build/libs/lib_0000/lib_0000_test" | grep -q 'ARM aarch64'
+
+  build-time:
+    name: build-time gate (Clang -ftime-trace)
+    needs: go
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - run: sudo apt-get install -y ninja-build clang
+      - run: make build
+      - run: scripts/ci/time-gate.sh "$RUNNER_TEMP/time-gate"
+
   dep:
     name: kiln-dep finds injected dependencies
     needs: go

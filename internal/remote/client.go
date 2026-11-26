@@ -74,13 +74,15 @@ func DigestProto(m proto.Message) (*repb.Digest, []byte, error) {
 }
 
 // GetActionResult returns the cached result, or ok=false on a cache miss.
-func (c *Client) GetActionResult(ctx context.Context, action *repb.Digest) (res *repb.ActionResult, ok bool, err error) {
+// It asks the server to inline stdout, stderr and the named output files;
+// servers may ignore that, so read them with ResultBlobs.
+func (c *Client) GetActionResult(ctx context.Context, action *repb.Digest, inlineFiles ...string) (res *repb.ActionResult, ok bool, err error) {
 	res, err = c.ac.GetActionResult(ctx, &repb.GetActionResultRequest{
 		InstanceName:      c.instance,
 		ActionDigest:      action,
 		InlineStdout:      true,
 		InlineStderr:      true,
-		InlineOutputFiles: nil,
+		InlineOutputFiles: inlineFiles,
 		DigestFunction:    repb.DigestFunction_SHA256,
 	})
 	if status.Code(err) == codes.NotFound {
@@ -90,6 +92,46 @@ func (c *Client) GetActionResult(ctx context.Context, action *repb.Digest) (res 
 		return nil, false, err
 	}
 	return res, true, nil
+}
+
+// ResultBlobs returns the result's stdout, stderr and output file contents
+// (by path), using inlined data where the server sent it and downloading the
+// rest in one batch.
+func (c *Client) ResultBlobs(ctx context.Context, ar *repb.ActionResult) (stdout, stderr []byte, files map[string][]byte, err error) {
+	var need []*repb.Digest
+	missing := func(raw []byte, d *repb.Digest) bool {
+		return len(raw) == 0 && d != nil && d.SizeBytes > 0
+	}
+	if missing(ar.StdoutRaw, ar.StdoutDigest) {
+		need = append(need, ar.StdoutDigest)
+	}
+	if missing(ar.StderrRaw, ar.StderrDigest) {
+		need = append(need, ar.StderrDigest)
+	}
+	for _, f := range ar.OutputFiles {
+		if missing(f.Contents, f.Digest) {
+			need = append(need, f.Digest)
+		}
+	}
+	got, err := c.Download(ctx, need)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	pick := func(raw []byte, d *repb.Digest) []byte {
+		if missing(raw, d) {
+			return got[d.Hash]
+		}
+		return raw
+	}
+	files = map[string][]byte{}
+	for _, f := range ar.OutputFiles {
+		b := pick(f.Contents, f.Digest)
+		if f.Digest != nil && cas.HashBytes(b) != f.Digest.Hash {
+			return nil, nil, nil, fmt.Errorf("output %s failed verification", f.Path)
+		}
+		files[f.Path] = b
+	}
+	return pick(ar.StdoutRaw, ar.StdoutDigest), pick(ar.StderrRaw, ar.StderrDigest), files, nil
 }
 
 // UpdateActionResult stores res for action. Upload its outputs first.

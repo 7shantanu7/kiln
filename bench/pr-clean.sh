@@ -77,9 +77,11 @@ while read -r -a files; do
   python3 - "$pr/kiln-cc.log" "$build_s" "${files[@]}" >> "$WORK/pr-clean.jsonl" <<'EOF'
 import collections, json, sys
 log, build_s, files = sys.argv[1], float(sys.argv[2]), sys.argv[3:]
-c = collections.Counter(json.loads(l)["outcome"] for l in open(log))
+rows = [json.loads(l) for l in open(log)]
+c = collections.Counter(r["outcome"] for r in rows)
 total = c["hit"] + c["miss"]
-print(json.dumps({"files": files, "hits": c["hit"], "misses": c["miss"], "errors": c["error"],
+direct = sum(1 for r in rows if r.get("mode") == "direct")
+print(json.dumps({"files": files, "hits": c["hit"], "direct_hits": direct, "misses": c["miss"], "errors": c["error"],
                   "hit_rate": round(100 * c["hit"] / total, 2), "build_s": build_s}))
 EOF
   log "PR $i (${files[*]}): $(tail -1 "$WORK/pr-clean.jsonl")"

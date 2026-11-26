@@ -42,7 +42,8 @@ func main() {
 		}
 		fmt.Printf("%d translation units, %.1fs compiling (%.0f%% frontend, %.0f%% backend)\n\n",
 			r.Files, r.TotalMs/1000, 100*r.FrontendMs/r.TotalMs, 100*r.BackendMs/r.TotalMs)
-		table("Headers by total parse time (inclusive)", r.Headers)
+		table("Headers by own parse time (excluding what they include)", r.HeaderSelf)
+		table("Headers by total parse time (including what they include)", r.Headers)
 		table("Template instantiations", r.Templates)
 		table("Slowest translation units", r.SlowestTUs)
 	case "snapshot":

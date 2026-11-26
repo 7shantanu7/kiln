@@ -1,0 +1,151 @@
+name: release
+
+# On a v* tag: publish signed, reproducible binaries and a signed multi-arch
+# kiln-cache image, each with SLSA v1.0 build provenance and an SPDX SBOM.
+# On main and pull requests: the same build, SBOM and image build, with
+# nothing published or signed, so the release path is tested before a tag.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  PUBLISH: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+jobs:
+  binaries:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write      # create the GitHub release
+      id-token: write      # Sigstore keyless signing
+      attestations: write  # provenance and SBOM attestations
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+      - name: Version
+        id: v
+        run: |
+          if [ "$PUBLISH" = true ]; then v=$GITHUB_REF_NAME; else v=0.0.0-${GITHUB_SHA::12}; fi
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - name: Build archives
+        run: scripts/release/build.sh "${{ steps.v.outputs.version }}" dist
+      - name: Rebuild in another directory and compare (reproducibility)
+        run: |
+          cp -a "$GITHUB_WORKSPACE" "$RUNNER_TEMP/rebuild"
+          "$RUNNER_TEMP/rebuild/scripts/release/build.sh" "${{ steps.v.outputs.version }}" "$RUNNER_TEMP/rebuild-dist" > /dev/null
+          diff dist/SHA256SUMS "$RUNNER_TEMP/rebuild-dist/SHA256SUMS"
+      - name: SBOM (SPDX)
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/kiln_${{ steps.v.outputs.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/
+
+      - name: SLSA v1.0 build provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: dist/*.tar.gz
+      - name: SBOM attestation
+        if: env.PUBLISH == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/kiln_${{ steps.v.outputs.version }}.spdx.json
+      - uses: sigstore/cosign-installer@v4
+        if: env.PUBLISH == 'true'
+      - name: Sign checksums
+        if: env.PUBLISH == 'true'
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+      - name: GitHub release
+        if: env.PUBLISH == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --generate-notes
+
+  image:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write      # push to ghcr.io
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Image name
+        id: img
+        run: |
+          echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kiln-cache" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISH" = true ]; then echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"; else echo "tag=dev" >> "$GITHUB_OUTPUT"; fi
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        if: env.PUBLISH == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # The Dockerfile cross-compiles on the runner, so arm64 needs no emulation.
+      - name: Build (and push on a tag)
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: |
+            ${{ steps.img.outputs.name }}:${{ steps.img.outputs.tag }}
+            ${{ steps.img.outputs.name }}:latest
+      - name: Smoke test (amd64)
+        run: |
+          docker buildx build --platform linux/amd64 --load -t kiln-cache:smoke .
+          docker run -d --name smoke -p 127.0.0.1:8981:8981 kiln-cache:smoke
+          for _ in $(seq 20); do curl -fs 127.0.0.1:8981/healthz && exit 0; sleep 0.5; done
+          docker logs smoke; exit 1
+
+      - name: Image SBOM (SPDX)
+        if: env.PUBLISH == 'true'
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: kiln-cache.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: SLSA v1.0 build provenance
+        if: env.PUBLISH == 'true'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ${{ steps.img.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: SBOM attestation
+        if: env.PUBLISH == 'true'
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ steps.img.outputs.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: kiln-cache.spdx.json
+          push-to-registry: true
+      - uses: sigstore/cosign-installer@v4
+        if: env.PUBLISH == 'true'
+      - name: Sign image
+        if: env.PUBLISH == 'true'
+        run: cosign sign --yes "${{ steps.img.outputs.name }}@${{ steps.build.outputs.digest }}"

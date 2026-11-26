@@ -196,7 +196,8 @@ type TimeTraceReport struct {
 	TotalMs    float64
 	FrontendMs float64
 	BackendMs  float64
-	Headers    []Cost // inclusive parse time per header, summed over TUs
+	Headers    []Cost // inclusive parse time per header (its own includes counted), summed over TUs
+	HeaderSelf []Cost // exclusive parse time per header: the time spent in the header itself
 	Templates  []Cost // instantiation time per template
 	SlowestTUs []Cost
 }
@@ -212,6 +213,8 @@ type traceFile struct {
 	TraceEvents []struct {
 		Name string  `json:"name"`
 		Ph   string  `json:"ph"`
+		Tid  int64   `json:"tid"`
+		Ts   float64 `json:"ts"`  // microseconds
 		Dur  float64 `json:"dur"` // microseconds
 		Args struct {
 			Detail string `json:"detail"`
@@ -221,16 +224,18 @@ type traceFile struct {
 
 // ReadTimeTraces walks dir for Clang time-trace JSON files (those next to
 // object files, named *.json with a "traceEvents" array) and aggregates them.
+// CMake's compiler identification builds are skipped.
 func ReadTimeTraces(dir string, top int) (*TimeTraceReport, error) {
 	r := &TimeTraceReport{}
 	headers := map[string]*Cost{}
+	self := map[string]*Cost{}
 	templates := map[string]*Cost{}
 	var tus []Cost
 	err := filepath.WalkDir(dir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || !strings.HasSuffix(p, ".json") || !strings.Contains(p, "CMakeFiles") {
+		if d.IsDir() || !strings.HasSuffix(p, ".json") || !strings.Contains(p, "CMakeFiles") || strings.Contains(p, "CompilerId") {
 			return nil
 		}
 		b, err := os.ReadFile(p)
@@ -242,6 +247,7 @@ func ReadTimeTraces(dir string, top int) (*TimeTraceReport, error) {
 			return nil
 		}
 		r.Files++
+		var sources []source
 		for _, ev := range tf.TraceEvents {
 			ms := ev.Dur / 1000
 			switch ev.Name {
@@ -253,10 +259,15 @@ func ReadTimeTraces(dir string, top int) (*TimeTraceReport, error) {
 			case "Total Backend":
 				r.BackendMs += ms
 			case "Source":
-				add(headers, ev.Args.Detail, ms)
+				name := filepath.Clean(ev.Args.Detail)
+				add(headers, name, ms)
+				sources = append(sources, source{name, ev.Tid, ev.Ts, ev.Dur})
 			case "InstantiateClass", "InstantiateFunction":
 				add(templates, ev.Args.Detail, ms)
 			}
+		}
+		for name, us := range selfTimes(sources) {
+			add(self, name, us/1000)
 		}
 		return nil
 	})
@@ -264,6 +275,7 @@ func ReadTimeTraces(dir string, top int) (*TimeTraceReport, error) {
 		return nil, err
 	}
 	r.Headers = topN(headers, top)
+	r.HeaderSelf = topN(self, top)
 	r.Templates = topN(templates, top)
 	sort.Slice(tus, func(i, j int) bool { return tus[i].Ms > tus[j].Ms })
 	if len(tus) > top {
@@ -271,6 +283,40 @@ func ReadTimeTraces(dir string, top int) (*TimeTraceReport, error) {
 	}
 	r.SlowestTUs = tus
 	return r, nil
+}
+
+type source struct {
+	name    string
+	tid     int64
+	ts, dur float64
+}
+
+// selfTimes returns, per header, its parse time minus the time spent in the
+// headers it includes. Clang emits Source events as nested complete events on
+// one thread, in end order rather than start order, so they are sorted first.
+func selfTimes(evs []source) map[string]float64 {
+	sort.Slice(evs, func(i, j int) bool {
+		if evs[i].tid != evs[j].tid {
+			return evs[i].tid < evs[j].tid
+		}
+		if evs[i].ts != evs[j].ts {
+			return evs[i].ts < evs[j].ts
+		}
+		return evs[i].dur > evs[j].dur
+	})
+	out := map[string]float64{}
+	var stack []source
+	for _, e := range evs {
+		for len(stack) > 0 && (stack[len(stack)-1].tid != e.tid || e.ts >= stack[len(stack)-1].ts+stack[len(stack)-1].dur) {
+			stack = stack[:len(stack)-1]
+		}
+		out[e.name] += e.dur
+		if len(stack) > 0 {
+			out[stack[len(stack)-1].name] -= e.dur
+		}
+		stack = append(stack, e)
+	}
+	return out
 }
 
 func add(m map[string]*Cost, name string, ms float64) {

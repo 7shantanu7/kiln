@@ -10,7 +10,7 @@ not do remote execution.
 | tool | what it does |
 |---|---|
 | `kiln-cache` | Remote cache server: Bazel Remote Execution API v2 (CAS, ActionCache, Capabilities, ByteStream) over gRPC, with a content-addressed disk store and LRU eviction |
-| `kiln-cc` | Compiler launcher that caches object files in any REAPI cache (kiln-cache, bazel-remote, buildbarn, ...) and shares them across checkouts |
+| `kiln-cc` | Compiler launcher that caches object files in any REAPI cache (kiln-cache, bazel-remote, buildbarn) and shares them across checkouts; cache hits skip the preprocessor |
 | `kiln-dep` | Runs Ninja under a seccomp/ptrace tracer and reports files that build steps read without declaring them |
 | `kiln-tia` | Test impact analysis: maps changed files to the tests they can affect, through the Ninja graph and recorded depfiles |
 | `kiln-trace` | Critical path from `.ninja_log`, Clang `-ftime-trace` breakdowns, and a CI gate on build-time regressions |
@@ -21,11 +21,18 @@ How each one works: [docs/design.md](docs/design.md).
 
 ## Quick start
 
-Requires Go 1.27+, CMake 3.20+, Ninja, and GCC or Clang on Linux.
+Requires CMake 3.20+, Ninja, and GCC or Clang on Linux; building from source
+also needs Go 1.27+.
 
 ```bash
 make build                                   # binaries in ./bin
 ./bin/kiln-cache -dir /var/cache/kiln &      # gRPC on 127.0.0.1:8980
+```
+
+Or run the cache server from the container image (amd64 and arm64):
+
+```bash
+docker run -d -p 8980:8980 -p 8981:8981 -v kiln-cache:/data ghcr.io/7shantanu7/kiln-cache:latest
 ```
 
 Add kiln to any CMake project from outside:
@@ -65,14 +72,19 @@ Raw data is in [bench/results/](bench/results/); method and caveats in
 
 | clean build | wall time | cache |
 |---|---|---|
-| no cache | 13m 15s (795 s) | |
-| empty cache (every compile a miss) | 15m 34s (934 s), **+17%** | 4,250 misses |
-| second checkout in another directory, warm cache | **2m 24s (144 s), 5.5× faster** | **4,250 / 4,250 hits** |
+| no cache | 13m 22s (801.5 s) | |
+| empty cache (every compile a miss) | 15m 43s (943.2 s), **+18%** | 4,250 misses |
+| second checkout in another directory, warm cache | **38.2 s, 21× faster** | **4,250 / 4,250 hits**, all direct |
 
-All 250 tests pass on the cached build. The cache held 170 MB. The build
-uses all 4 cores (parallelism 3.99) and its critical path is 20.7 s, so it is
-throughput-bound. A warm build still runs the preprocessor once per file to
-compute the cache key, which is what limits the speedup to 5.5×.
+All 250 tests pass on the cached build. The cache held 362 MB (objects plus
+direct-mode manifests). Without a cache the build uses all 4 cores
+(parallelism 3.99) and its critical path is 20.7 s.
+
+Every hit was found in direct mode, without running the preprocessor, at a
+median 15 ms per file. Before direct mode the same benchmark ran the
+preprocessor for every hit and reached 5.5× (144 s); on the 200-file CI
+fixture a hit took a median 119 ms that way and 28 ms in direct mode. The
+cold build pays for a preprocessor run and an upload per file.
 
 ### What CI sees: pull request builds against a cache warmed from main
 
@@ -82,12 +94,13 @@ built clean in a fresh checkout in a new directory with the cache read-only
 
 | | hit rate | clean build |
 |---|---|---|
-| median | **99.4%** | **129 s** (6.2× faster than no cache) |
-| worst (3 widely included headers) | **98.0%** (86 of 4,250 missed) | 140 s |
-| best (one `.cpp`) | 99.98% (1 missed) | 124 s |
+| median | **99.4%** | **44.4 s** (18× faster than no cache) |
+| worst (3 widely included headers) | **98.0%** (86 of 4,250 missed) | 57.3 s |
+| best (one `.cpp`) | 99.98% (1 missed) | 38.9 s |
 | all 10 pooled | 99.3% | |
 
-Every miss is a file the change really affects. All tests passed on every build.
+Every miss is a file the change really affects; every hit was direct. All
+tests passed on every build.
 
 ### Test impact analysis (kiln-tia)
 
@@ -97,15 +110,13 @@ checkout:
 | median per PR | all tests | kiln-tia selected |
 |---|---|---|
 | tests run | 250 | 27.5 |
-| test time | 4.05 s | **0.49 s** |
-| kiln-tia analysis | | 1.60 s |
-| incremental build + analysis + tests | 8.73 s | **6.65 s** |
+| test time | 4.03 s | **0.49 s** |
+| kiln-tia analysis | | 1.59 s |
+| incremental build + analysis + tests | 8.79 s | **6.54 s** |
 
-Selections ranged from 2 tests (a header in a leaf library) to 200 (a `.cpp`
+Selections ranged from 1 test (a header in a leaf library) to 200 (a `.cpp`
 in a library almost everything links). The fixture's whole suite takes 4 s,
-so the absolute saving is small; it grows with test suite cost. (kiln-tia was
-re-timed after a change that batches its Ninja queries: 3.76 s before, with
-identical selections; `bench/results/prs-tia-v2.jsonl`.)
+so the absolute saving is small; it grows with test suite cost.
 
 ### Undeclared dependencies (kiln-dep)
 
@@ -130,6 +141,29 @@ Same 60-library shape, `RelWithDebInfo`, all reproducibility bugs injected:
 The 72 non-root differences with toolchain fixes on are archives and
 executables containing those 7 files.
 
+## Releases
+
+Tagging `v*` runs [.github/workflows/release.yml](.github/workflows/release.yml):
+
+- static binaries for linux/amd64 and linux/arm64, built reproducibly
+  (`scripts/release/build.sh`); the workflow rebuilds them from a copy of the
+  tree in another directory and fails unless the checksums match;
+- the multi-arch `kiln-cache` image on ghcr.io;
+- for both: SLSA v1.0 build provenance and an SPDX SBOM as signed GitHub
+  attestations, and Sigstore keyless signatures (cosign) on `SHA256SUMS` and
+  the image.
+
+Every push and pull request runs the same build, rebuild check, SBOM and image
+build without publishing. To verify a release:
+
+```bash
+gh attestation verify kiln_v0.1.0_linux_amd64.tar.gz --repo 7shantanu7/kiln
+gh attestation verify oci://ghcr.io/7shantanu7/kiln-cache:v0.1.0 --repo 7shantanu7/kiln
+cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity-regexp '^https://github.com/7shantanu7/kiln/' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
 ## Testing
 
 `make test` runs the Go unit tests, including the tracer against real
@@ -137,9 +171,16 @@ processes. CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) also runs,
 on generated fixtures:
 
 - a cache round trip for GCC and Clang × Debug, Release, RelWithDebInfo: the
-  second checkout must be 100% cache hits with byte-identical objects and
-  passing tests;
-- the same round trip against bazel-remote, to check REAPI interoperability;
+  second checkout must be 100% cache hits, all in direct mode, with
+  byte-identical objects and passing tests;
+- the same round trip against bazel-remote and buildbarn (bb-storage), to
+  check REAPI interoperability;
+- the round trip cross-compiled for aarch64 on an x86-64 runner, with the
+  tests run under QEMU user-mode emulation
+  ([cmake/toolchains/aarch64-linux-gnu.cmake](cmake/toolchains/aarch64-linux-gnu.cmake));
+- the build-time gate, both ways: an unchanged rebuild must pass, an injected
+  compile-time regression must fail, and `kiln-trace headers` must name its
+  cause from real Clang `-ftime-trace` output;
 - `kiln-dep` must find exactly the injected undeclared dependencies, and none
   in a clean fixture;
 - `kiln-repro` must report all six injected causes, leave only the two that
@@ -148,8 +189,9 @@ on generated fixtures:
 ## Limitations
 
 - Linux only. `kiln-dep` supports x86-64 and arm64.
-- `kiln-cc` hashes preprocessor output, which costs a preprocessor run per
-  compile (see the cold-cache numbers). It does not cache links.
+- On a miss, `kiln-cc` runs the preprocessor to compute the key, which costs
+  time on a cold cache (see the numbers). Direct mode removes it from hits.
+  It does not cache links.
 - The cache speaks plaintext gRPC with no authentication; put it behind a
   TLS-terminating proxy for anything beyond a trusted network.
 - `kiln-tia` is only as sound as the graph. Run `kiln-dep` in CI so undeclared

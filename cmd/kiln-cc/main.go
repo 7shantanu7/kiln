@@ -12,6 +12,8 @@
 //	--base-dir=DIR       KILN_BASE_DIRS       paths rewritten so checkouts share entries (repeatable; env is colon-separated)
 //	--read-only          KILN_CACHE_READONLY=1  look up but never upload
 //	--log=FILE           KILN_CC_LOG          append one JSON line per invocation
+//	--no-direct          KILN_CC_DIRECT=0     always run the preprocessor to compute the key
+//	                                          (direct mode looks keys up by header hashes instead)
 package main
 
 import (
@@ -28,6 +30,7 @@ func main() {
 		Instance: os.Getenv("KILN_CACHE_INSTANCE"),
 		ReadOnly: os.Getenv("KILN_CACHE_READONLY") == "1",
 		LogPath:  os.Getenv("KILN_CC_LOG"),
+		NoDirect: os.Getenv("KILN_CC_DIRECT") == "0",
 	}
 	if v := os.Getenv("KILN_BASE_DIRS"); v != "" {
 		opts.BaseDirs = strings.Split(v, ":")
@@ -51,6 +54,8 @@ func main() {
 			opts.ReadOnly = true
 		case "--log":
 			opts.LogPath = v
+		case "--no-direct":
+			opts.NoDirect = true
 		default:
 			fmt.Fprintf(os.Stderr, "kiln-cc: unknown option %s\n", a)
 			os.Exit(2)

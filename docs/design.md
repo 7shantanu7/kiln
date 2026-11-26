@@ -54,6 +54,36 @@ Set as `CMAKE_<LANG>_COMPILER_LAUNCHER` (kiln.cmake does this). For each
 4. On a miss, compiles, then uploads the outputs and the action result, unless
    `--read-only` is set (use that for untrusted pull request builds).
 
+### Direct mode
+
+Running the preprocessor is most of the cost of a cache hit, so kiln-cc first
+tries to find the key without it, the way ccache's direct mode does, but with
+the lookup table in the shared cache so every checkout benefits:
+
+1. A **manifest key** hashes the compiler identity, the normalised arguments,
+   the include-path environment (`CPATH` and friends) and the source file's
+   content.
+2. The manifest, stored in the action cache under that key, holds up to 8
+   entries. Each lists every file an earlier compile of that source read, taken
+   from the preprocessor's line markers (so system headers are included), with
+   its SHA-256 and size, and the preprocessed key that compile produced.
+3. kiln-cc hashes the listed files in this checkout (paths mapped through the
+   base directories). If one entry matches completely, the preprocessed key
+   must be the same, so it fetches that result directly: two lookups and some
+   hashing instead of a preprocessor run.
+4. Otherwise it falls back to the preprocessed key, and after a hit or a
+   successful compile adds an entry for the files this compile read. Read-only
+   builds look manifests up but never write them.
+
+A compile is never recorded if its output can differ while its inputs do not:
+it uses `__DATE__`, `__TIME__` or `__TIMESTAMP__`; it uses `__FILE__` while
+base directories are rewritten but `__FILE__` is not prefix-mapped; or one of
+the files it read was modified while it ran. Like ccache, direct mode does not
+notice a new header that shadows an old one earlier on the include path;
+`--no-direct` (or `KILN_CC_DIRECT=0`) turns it off.
+
+### Debug info
+
 Debug info records absolute paths. If the compile has `-g` and the base
 directories are not all covered by `-ffile-prefix-map`/`-fdebug-prefix-map`,
 the working directory joins the key, so such objects are only reused in the
@@ -123,9 +153,17 @@ invisible to kiln-tia.
   path (longest chain through static inputs). With unlimited cores the build
   cannot be faster than this.
 - `headers`: aggregates Clang `-ftime-trace` files: frontend/backend split,
-  inclusive header parse time, template instantiation time.
+  header parse time both inclusive and exclusive (Clang nests `Source`
+  events, so a header's own time is its duration minus its children's),
+  template instantiation time and the slowest translation units.
 - `snapshot` / `compare`: saves CPU time, critical path and per-rule-kind CPU
-  time, and fails when any grows past a threshold, as a CI gate.
+  time, and fails when any grows past a threshold, as a CI gate. Metrics with
+  small baselines are ignored as noise.
+
+kiln's CI checks the gate both ways (`scripts/ci/time-gate.sh`): a second
+clean build of an unchanged tree must pass, and adding `<regex>` with one
+regex instantiation to the most-included header must fail it (+59% compile
+CPU on the fixture) and show up in `headers` as the top template cost.
 
 ## kiln-repro: reproducibility
 

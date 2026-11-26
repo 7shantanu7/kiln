@@ -10,7 +10,8 @@
 #                             cache. When set, kiln-cc becomes the compiler launcher.
 #                             Defaults to the KILN_CACHE_ADDR environment variable.
 #   KILN_CACHE_READONLY  OFF  Look up but never upload (use for pull requests).
-#   KILN_CC                   Path to kiln-cc (default: searched on PATH).
+#   KILN_CC                   Path to kiln-cc (default: next to kiln.cmake in a
+#                             release archive, ./bin in a checkout, then PATH).
 #
 # For reproducible timestamps, export SOURCE_DATE_EPOCH for both configure and
 # build: CMake's string(TIMESTAMP) and the compilers' __DATE__/__TIME__ honor it.
@@ -30,7 +31,8 @@ if(KILN_PREFIX_MAP)
 endif()
 
 if(KILN_CACHE_ADDR)
-  find_program(KILN_CC kiln-cc REQUIRED)
+  # Next to this file in a release archive, ../bin in a source checkout, else PATH.
+  find_program(KILN_CC kiln-cc HINTS "${CMAKE_CURRENT_LIST_DIR}/.." "${CMAKE_CURRENT_LIST_DIR}/../bin" REQUIRED)
   set(_kiln_launcher "${KILN_CC}"
     "--addr=${KILN_CACHE_ADDR}"
     "--base-dir=${CMAKE_SOURCE_DIR}"

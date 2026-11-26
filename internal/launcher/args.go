@@ -136,3 +136,20 @@ func (c *Compile) PrefixMaps() []string {
 	}
 	return olds
 }
+
+// MacroPrefixMaps returns the OLD side of every prefix map that also applies
+// to __FILE__ (-ffile-prefix-map and -fmacro-prefix-map).
+func (c *Compile) MacroPrefixMaps() []string {
+	var olds []string
+	for _, a := range c.Args {
+		for _, p := range []string{"-ffile-prefix-map=", "-fmacro-prefix-map="} {
+			if strings.HasPrefix(a, p) {
+				kv := strings.TrimPrefix(a, p)
+				if i := strings.LastIndex(kv, "="); i > 0 {
+					olds = append(olds, kv[:i])
+				}
+			}
+		}
+	}
+	return olds
+}
