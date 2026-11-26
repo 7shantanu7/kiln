@@ -1,3 +1,4 @@
 /bin/
 /.bench-work/
 *.test
+/dist/
