@@ -157,8 +157,8 @@ Every push and pull request runs the same build, rebuild check, SBOM and image
 build without publishing. To verify a release:
 
 ```bash
-gh attestation verify kiln_v0.1.0_linux_amd64.tar.gz --repo 7shantanu7/kiln
-gh attestation verify oci://ghcr.io/7shantanu7/kiln-cache:v0.1.0 --repo 7shantanu7/kiln
+gh attestation verify kiln_v0.1.1_linux_amd64.tar.gz --repo 7shantanu7/kiln
+gh attestation verify oci://ghcr.io/7shantanu7/kiln-cache:v0.1.1 --repo 7shantanu7/kiln
 cosign verify-blob SHA256SUMS --bundle SHA256SUMS.sigstore.json \
   --certificate-identity-regexp '^https://github.com/7shantanu7/kiln/' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
