@@ -279,7 +279,19 @@ type LogEntry struct {
 // Duration returns the edge's wall time in milliseconds.
 func (l LogEntry) Duration() int64 { return l.EndMs - l.StartMs }
 
-// ReadLog parses .ninja_log (format v5 or v6) and returns the most recent
+// supportedLog reports whether a .ninja_log header names a format kiln reads.
+// v5 (Ninja 1.10), v6 and v7 (Ninja 1.13) all write start, end, mtime, output
+// and command hash; only the hash function changed.
+func supportedLog(header string) bool {
+	for _, v := range []string{"5", "6", "7"} {
+		if strings.TrimSpace(header) == "# ninja log v"+v {
+			return true
+		}
+	}
+	return false
+}
+
+// ReadLog parses .ninja_log (format v5 to v7) and returns the most recent
 // entry per output. Entries are only meaningful for the latest build when
 // that build was a clean one.
 func ReadLog(dir string) (map[string]LogEntry, error) {
@@ -295,7 +307,7 @@ func ReadLog(dir string) (map[string]LogEntry, error) {
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(line, "#") {
-			if !strings.HasPrefix(line, "# ninja log v5") && !strings.HasPrefix(line, "# ninja log v6") {
+			if !supportedLog(line) {
 				return nil, fmt.Errorf("unsupported %s", line)
 			}
 			continue

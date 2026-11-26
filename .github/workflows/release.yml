@@ -70,7 +70,7 @@ jobs:
         with:
           subject-path: dist/*.tar.gz
           sbom-path: dist/kiln_${{ steps.v.outputs.version }}.spdx.json
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.4
         if: env.PUBLISH == 'true'
       - name: Sign checksums
         if: env.PUBLISH == 'true'
@@ -144,7 +144,7 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
           sbom-path: kiln-cache.spdx.json
           push-to-registry: true
-      - uses: sigstore/cosign-installer@v4
+      - uses: sigstore/cosign-installer@v4.1.4
         if: env.PUBLISH == 'true'
       - name: Sign image
         if: env.PUBLISH == 'true'
